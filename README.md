@@ -38,19 +38,19 @@
 
 ### Dashboard | 整体控制台
 
-![Dashboard](./docs/images/dashboard.png)
+![Dashboard](./docs/images/仪表盘.png)
 
 ### AI App Market | AI 应用市场
 
-![App Market](./docs/images/app-market.png)
+![App Market](./docs/images/应用市场.png)
 
 ### Cluster Management | 节点集群管理
 
-![Cluster](./docs/images/cluster-management.png)
+![Cluster](./docs/images/算力节点.png)
 
-### Model Management | 模型管理
+### System Monitoring | 系统监控
 
-![Model](./docs/images/model-management.png)
+![Monitoring](./docs/images/系统监控.png)
 
 ---
 
