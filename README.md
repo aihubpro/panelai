@@ -171,7 +171,7 @@ PanelAI 希望用统一的平台连接这一切。
 ### 一键安装
 
 ```bash
-curl -v https://install.panelai.cn/install.sh > install.sh && chmod 777 install.sh && ./install.sh
+curl -sSL https://install.panelai.cn/install.sh | bash
 ```
 
 安装完成后根据终端提示获取：
