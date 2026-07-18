@@ -170,9 +170,22 @@ PanelAI 希望用统一的平台连接这一切。
 
 ### 一键安装
 
+请根据您的服务器所在地域，选择对应的安装命令：
+
+**🌏 国内服务器（极速源）**
+
 ```bash
 curl -sSL https://install.panelai.cn/install.sh | bash
 ```
+
+**🌍 海外服务器（GitHub 源）**
+
+```bash
+curl -sSL https://raw.githubusercontent.com/aihubpro/panelai/main/install_github.sh | bash
+```
+
+> **💡 子节点安装提示：**
+> 在面板后台获取子节点的安装命令后，如果您的子节点位于海外服务器，只需将命令中的下载地址更换即可：把 `https://install.panelai.cn/install_node.sh` 替换为 `https://raw.githubusercontent.com/aihubpro/panelai-node/main/install_node_github.sh` ，后面的参数直接保留，无需任何修改。
 
 安装完成后根据终端提示获取：
 
