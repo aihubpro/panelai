@@ -41,7 +41,7 @@ PACKAGE_PREFIX="${PACKAGE_PREFIX:-Panelai}"
 
 GITHUB_RELEASE_URL="${GITHUB_RELEASE_URL:-https://github.com/aihubpro/panelai/releases}"
 
-REQUIRED_PORTS=(3000 3001 50051 5432 6379 80 443 8080 13603)
+REQUIRED_PORTS=(3000 3001 50051 5432 6379 80 443 8080 9000 13603)
 REQUIRED_UDP_PORTS=(3478)
 
 usage() {
@@ -356,16 +356,23 @@ start_service() {
 show_result() {
     local lan_ip=$(get_lan_ip); [[ -z "$lan_ip" ]] && lan_ip="<服务器IP>"
     local pwd=""; [[ -f "${INSTALL_DIR}/storage/initial_admin_password.txt" ]] && pwd=$(cat "${INSTALL_DIR}/storage/initial_admin_password.txt" 2>/dev/null)
+    local admin_path=""; [[ -f "${INSTALL_DIR}/storage/initial_admin_path.txt" ]] && admin_path=$(cat "${INSTALL_DIR}/storage/initial_admin_path.txt" 2>/dev/null)
     echo ""
     echo -e "${GREEN}========================================${NC}"
     echo -e "${GREEN}  PanelAI 部署成功!${NC}"
     echo -e "${GREEN}========================================${NC}"
     echo ""
-    echo "  访问地址: http://${lan_ip}:3000"
+    echo "  用户端:"
+    echo "    内网: http://${lan_ip}:3000"
+    echo "    公网: http://[公网ip]:3000"
+    echo ""
+    echo "  管理端:"
+    echo "    内网: http://${lan_ip}:3000${admin_path}"
+    echo "    公网: http://[公网ip]:3000${admin_path}"
     echo "  管理员:   admin"
     [[ -n "$pwd" ]] && echo "  密  码:   $pwd" || echo "  密  码:   请查看 ${INSTALL_DIR}/storage/initial_admin_password.txt"
     echo ""
-    echo "  防火墙放行: TCP 80,443,3000,3001,50051,13603,40000-50000 / UDP 3478,40000-50000"
+    echo "  防火墙放行: TCP 80,443,3000,3001,50051,9000,13603,40000-50000 / UDP 3478"
     echo "  管理命令:   pai"
     echo ""
 }
