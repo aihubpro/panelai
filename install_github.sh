@@ -41,6 +41,26 @@ PACKAGE_PREFIX="${PACKAGE_PREFIX:-Panelai}"
 
 GITHUB_RELEASE_URL="${GITHUB_RELEASE_URL:-https://github.com/aihubpro/panelai/releases}"
 
+IMAGE_BASE_URL="${IMAGE_BASE_URL:-https://download.panelai.cn/images}"
+VERSION_IMAGE_JSON_URL="${VERSION_IMAGE_JSON_URL:-https://install.panelai.cn/version_image.json}"
+PANELAI_IMAGE_VERSION="${PANELAI_IMAGE_VERSION:-}"
+
+# ASR 语音识别模型 (缺失时自动下载到模型目录)
+SHERPA_MODEL_URL="${SHERPA_MODEL_URL:-https://download.panelai.cn/model/sherpa-model.tar.gz}"
+SHERPA_MODEL_DIR="${SHERPA_MODEL_DIR:-${HOME}/panelai/sherpa-model}"
+
+# 完整镜像名列表 (带 tag, 与 docker-infra.yml 引用一致). 已存在检查按精确 tag 判断,
+# 避免服务器残留旧 tag 镜像时误判"已存在"跳过加载, 导致部署时去 Docker Hub 拉取超时.
+# OSS 镜像包文件名 = 纯名 (去掉 kukuxiong8/ 前缀与 tag), 如 panelai-postgres.tar.gz
+PANELAI_DOCKER_IMAGES=(
+    kukuxiong8/panelai-traefik:3.7.8
+    kukuxiong8/panelai-redis:7.4.8
+    kukuxiong8/panelai-postgres:15.17
+    kukuxiong8/panelai-netbird:latest
+    kukuxiong8/panelai-netbird-server:latest
+    kukuxiong8/panelai-sherpa-asr:zh-en
+)
+
 REQUIRED_PORTS=(3000 3001 50051 5432 6379 80 443 8080 9000 13603)
 REQUIRED_UDP_PORTS=(3478)
 
@@ -169,7 +189,7 @@ check_system() {
 
 # ─── Step 2: 下载安装包 (GitHub) ──────────────────────────────────
 download_and_extract() {
-    step "Step 3/6: 部署核心程序"
+    step "Step 3/7: 部署核心程序"
     local tmp_dir pkg_file
     tmp_dir=$(mktemp -d); pkg_file="$tmp_dir/release.tar.gz"
     trap 'rm -rf "${tmp_dir:-}"' EXIT
@@ -275,7 +295,7 @@ check_ports() {
 
 # ─── Step 4: Docker & Compose (系统源) ────────────────────────────
 check_docker() {
-    step "Step 2/6: 安装基础环境"
+    step "Step 2/7: 安装基础环境"
 
     if command -v docker &>/dev/null; then
         info "Docker 已安装 ($(docker --version 2>/dev/null | awk '{print $3}' | tr -d ','))"
@@ -318,38 +338,118 @@ install_docker_compose() {
     info "Docker Compose 安装完成"
 }
 
-# ─── Step 5: 启动基础设施 ─────────────────────────────────────────
+# ─── Step 5: 镜像预加载 (OSS) ─────────────────────────────────────
+fetch_image_version() {
+    local json_text=$(curl -fsSL --connect-timeout 10 --max-time 30 "$VERSION_IMAGE_JSON_URL" 2>/dev/null) || { warn "跳过镜像预加载"; return 1; }
+    local resolved_version=$(echo "$json_text" | sed -n 's/.*"latest"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    [[ -z "$resolved_version" ]] && { warn "镜像版本信息异常"; return 1; }
+    PANELAI_IMAGE_VERSION="$resolved_version"
+}
+
+setup_netbird_geodb() {
+    [[ -z "$PANELAI_IMAGE_VERSION" ]] && return 0
+    local tmp_file=$(mktemp /tmp/netbird-geo.XXXXXX.tar.gz)
+    curl -fSL# --connect-timeout 15 --max-time 300 "${IMAGE_BASE_URL}/${PANELAI_IMAGE_VERSION}/netbird-geo.tar.gz" -o "$tmp_file" || { rm -f "$tmp_file"; return 0; }
+    mkdir -p "$HOME/panelai/netbird-server"
+    tar -xzf "$tmp_file" -C "$HOME/panelai/netbird-server" 2>/dev/null || true
+    rm -f "$tmp_file"
+}
+
+# ─── ASR 模型预下载 (缺失时自动拉取, 失败不阻塞安装) ──────────────
+setup_sherpa_model() {
+    # 模型已存在则跳过
+    if [ -f "$SHERPA_MODEL_DIR/tokens.txt" ]; then
+        info "语音识别模型已存在, 跳过下载"
+        return 0
+    fi
+    info "下载语音识别模型..."
+    local tmp_file=$(mktemp /tmp/sherpa-model.XXXXXX.tar.gz)
+    local tmp_dir=$(mktemp -d)
+    if curl -fSL# --connect-timeout 15 --max-time 600 "$SHERPA_MODEL_URL" -o "$tmp_file"; then
+        mkdir -p "$SHERPA_MODEL_DIR" "$tmp_dir"
+        tar -xzf "$tmp_file" -C "$tmp_dir" 2>/dev/null
+        # 兼容嵌套压缩包: 顶层目录下若还有 *.tar.gz (重复打包残留), 二次解压后再定位
+        if ! find "$tmp_dir" -name tokens.txt 2>/dev/null | grep -q .; then
+            find "$tmp_dir" -name "*.tar.gz" -exec tar -xzf {} -C "$tmp_dir" \; 2>/dev/null || true
+            find "$tmp_dir" -name "*.tar.gz" -delete 2>/dev/null
+        fi
+        # 定位含 tokens.txt 的目录 (兼容包内带顶层目录), 内容拷到模型目录
+        local src_dir
+        src_dir=$(find "$tmp_dir" -name tokens.txt -exec dirname {} \; 2>/dev/null | head -1)
+        if [ -n "$src_dir" ]; then
+            cp -a "$src_dir"/. "$SHERPA_MODEL_DIR"/
+            rm -rf "$tmp_dir" "$tmp_file"
+            info "语音识别模型下载完成"
+        else
+            rm -rf "$tmp_dir" "$tmp_file"
+            warn "模型包内容异常, 请手动放置模型到 $SHERPA_MODEL_DIR"
+        fi
+    else
+        rm -f "$tmp_file"; rm -rf "$tmp_dir"
+        warn "语音识别模型下载失败, 引擎暂不可用, 可稍后手动放置到 $SHERPA_MODEL_DIR"
+    fi
+}
+
+preload_docker_images() {
+    [[ -z "$PANELAI_IMAGE_VERSION" ]] && return 0
+    local tmp_dir=$(mktemp -d) loaded=0 skipped=0 already=0
+    for image in "${PANELAI_DOCKER_IMAGES[@]}"; do
+        local short="${image%%:*}"  # 去 tag, 用于取包文件名/显示名
+        # 检查本地是否已有该精确 tag 镜像, 有则跳过下载.
+        if docker images -q "$image" 2>/dev/null | grep -q .; then
+            already=$((already+1))
+            info "${short##*/} (已存在, 跳过)"
+            continue
+        fi
+        local img_file="$tmp_dir/${short##*/}.tar.gz"
+        info "${short##*/}"
+        curl -fSL# --connect-timeout 15 --max-time 600 "${IMAGE_BASE_URL}/${PANELAI_IMAGE_VERSION}/${short##*/}.tar.gz" -o "$img_file" || { skipped=$((skipped+1)); continue; }
+        docker load -i "$img_file" >/dev/null 2>&1 && loaded=$((loaded+1)) || skipped=$((skipped+1))
+        rm -f "$img_file"
+    done
+    rm -rf "$tmp_dir"
+    local total=$((loaded+already))
+    info "镜像: ${total} 就绪 (${loaded} 新增, ${already} 已有, ${skipped} 失败)"
+}
+
+# ─── Step 6: 启动基础设施 ─────────────────────────────────────────
 start_infra_containers() {
-    step "Step 4/6: 启动基础设施"
+    step "Step 5/7: 启动基础设施"
     cd "$INSTALL_DIR"
-    info "拉取镜像并启动容器 (首次从 Docker Hub 拉取, 请耐心等待)..."
     timeout 900 ${CLI_NAME} infra up || { error "infra up 失败"; ${CLI_NAME} infra status 2>/dev/null || true; exit 1; }
     info "基础设施已启动"
 }
 
-# ─── Step 6: 网络配置 ─────────────────────────────────────────────
+# ─── Step 7: 网络配置 ─────────────────────────────────────────────
 setup_network() {
-    step "Step 5/6: 配置防火墙规则"
+    step "Step 6/7: 配置防火墙规则"
     cd "$INSTALL_DIR"
     ${CLI_NAME} infra setup || { error "infra setup 失败"; exit 1; }
 }
 
-# ─── Step 7: 启动服务 ─────────────────────────────────────────────
+# ─── Step 8: 启动服务 ─────────────────────────────────────────────
 start_service() {
-    step "Step 6/6: 启动控制面板"
+    step "Step 7/7: 启动控制面板"
     cd "$INSTALL_DIR"
-    ${CLI_NAME} status 2>/dev/null | grep -q "运行中" && { info "服务已在运行中"; return 0; }
-    ${CLI_NAME} start || { error "启动失败"; exit 1; }
+    if ${CLI_NAME} status 2>/dev/null | grep -q "运行中"; then
+        # 进程存活但不等于服务就绪 (HTTP 端口监听是启动最后一步), 继续等待就绪
+        info "服务进程已存在, 等待就绪..."
+    else
+        ${CLI_NAME} start || { error "启动失败"; exit 1; }
+    fi
 
-    local waited=0 max_wait=30
+    # 等待 HTTP 端口可访问: 进程拉起 ≠ 可访问, DB 首次初始化/迁移可能耗时较长.
+    # curl 连接成功(返回 0)即视为就绪, 不依赖 HTTP 状态码 (首页可能 404/302 均正常).
+    local waited=0 max_wait=120
     while (( waited < max_wait )); do
         sleep 2; waited=$((waited+2))
-        timeout 5 ${CLI_NAME} status 2>/dev/null | grep -q "运行中" && {
+        if curl -s -o /dev/null --connect-timeout 2 --max-time 3 "http://127.0.0.1:3000/" 2>/dev/null; then
             ${CLI_NAME} autostart enable 2>/dev/null && info "服务已启动 (开机自启)" || { info "服务已启动"; warn "开机自启失败, 请手动执行: ${CLI_NAME} autostart enable"; }
             return 0
-        }
+        fi
+        (( waited % 10 == 0 )) && info "等待服务就绪... ${waited}s"
     done
-    error "启动超时"; ${CLI_NAME} logs 2>/dev/null || true; exit 1
+    error "服务启动超时 (HTTP 3000 未就绪)"; ${CLI_NAME} logs 2>/dev/null || true; exit 1
 }
 
 # ─── 安装结果 ─────────────────────────────────────────────────────
@@ -400,6 +500,11 @@ main() {
     resolve_version
     check_docker
     download_and_extract
+    step "Step 4/7: 初始化基础设施组件"
+    fetch_image_version
+    setup_netbird_geodb
+    preload_docker_images
+    setup_sherpa_model
     start_infra_containers
     setup_network
     start_service
