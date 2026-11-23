@@ -185,6 +185,54 @@ check_system() {
     [[ -z "$PKG_MGR" ]] && { error "未检测到支持的包管理器"; exit 1; }
     info "包管理器: $PKG_MGR"
     for tool in curl tar gzip; do command -v "$tool" &>/dev/null || pkg_install "$tool"; done
+    ensure_iptables
+}
+
+# ─── iptables 依赖 (端口转发必需) ─────────────────────────────────
+#
+# ★ 为什么必须装:
+#   端口转发 (外部端口段 -> 3001) 与 INPUT 放行都依赖 iptables 命令.
+#   Debian 12 / Ubuntu 22.04+ 等新发行版**默认不预装 iptables** (内核有 nftables
+#   支持但没有命令行工具), 装完 PanelAI 后 `iptables: 未找到命令`,
+#   面板启动时的补规则与安装时的 setup 全部静默失败 ->
+#   应用打不开 (502/503) 且用户完全看不到任何失败原因.
+#
+# ★ 为什么装 iptables 而不是只装 nftables:
+#   iptables 在新发行版上是 nftables 的兼容前端 (iptables-nft), 行为一致,
+#   但脚本与面板代码统一用 iptables 语法, 装 iptables 即可全平台一致.
+#
+# ★ 覆盖的发行版 (包名统一为 iptables):
+#   Debian/Ubuntu/Mint/Raspbian (apt) | RHEL/CentOS/Rocky/Alma/Fedora (dnf/yum)
+#   | openSUSE/SLES (zypper) | Arch/Manjaro (pacman) | Alpine (apk)
+#
+# ★ 覆盖的部署形态 (与发行版无关):
+#   物理裸金属 | 云主机 (AWS/Azure/GCP) | 微软 Hyper-V 虚拟机
+#   | VMware ESXi 虚拟机 | PVE/Proxmox 虚拟机 (含 LXC 容器) | Docker 容器
+#   这些形态的差别只在"谁来执行 iptables", 与本函数无关:
+#   - 宿主/裸机: iptables 作用在宿主机 netfilter 上, 正是需要的
+#   - 虚拟机: iptables 作用在虚拟机内核上, 外部流量先经虚拟网卡, 同样生效
+#   - 面板跑在容器内: 由 portforward.EnsureOnStartup 检测到容器环境后跳过
+#     (容器内无法改宿主机 netfilter), 规则由宿主机上的面板进程补齐
+ensure_iptables() {
+    if command -v iptables &>/dev/null; then
+        info "iptables 已就绪"
+        return 0
+    fi
+    info "安装 iptables (端口转发必需)..."
+    # 逐个尝试候选包, 每次安装后都实际验证命令是否出现.
+    # 不依赖 pkg_install 的返回值 (不同包管理器的退出码语义不完全一致),
+    # 以 "command -v iptables" 为唯一判据.
+    local pkg
+    for pkg in iptables nftables; do
+        pkg_install "$pkg" || true
+        if command -v iptables &>/dev/null; then
+            info "iptables 安装完成 (包: $pkg)"
+            return 0
+        fi
+    done
+    warn "iptables 安装失败, 应用端口转发可能不可用 (不影响面板本体访问)"
+    warn "  请手动执行: apt-get install -y iptables (Debian/Ubuntu) 或 dnf install -y iptables (RHEL/CentOS)"
+    warn "  或直接向工单反馈此提示, 我们会补充对应发行版的安装方式"
 }
 
 # ─── Step 2: 下载安装包 (GitHub) ──────────────────────────────────
@@ -425,6 +473,24 @@ setup_network() {
     step "Step 6/7: 配置防火墙规则"
     cd "$INSTALL_DIR"
     ${CLI_NAME} infra setup || { error "infra setup 失败"; exit 1; }
+
+    # ★ 自检: 端口转发必须真的生效, 不能只看命令退出码.
+    #   infra setup 内部对单条规则的失败只记警告 (避免单点失败中断安装),
+    #   但如果 REDIRECT 或 INPUT 规则整体没加上, 用户后续打开应用会 502/503,
+    #   而安装过程却显示成功 —— 这里做一次落地校验, 不通过就明确告知.
+    local redirect_ok=0 input_ok=0
+    if command -v iptables &>/dev/null; then
+        iptables -t nat -S PREROUTING 2>/dev/null | grep -q "REDIRECT" && redirect_ok=1
+        iptables -S INPUT 2>/dev/null | grep -qE "dport (3001|${PORT_RANGE_START:-40000}:)" && input_ok=1
+    fi
+    if [[ $redirect_ok -eq 1 && $input_ok -eq 1 ]]; then
+        info "端口转发规则已生效"
+    else
+        warn "端口转发规则未完全生效, 应用可能无法从外部访问 (面板本体访问不受影响)"
+        [[ $redirect_ok -eq 0 ]] && warn "  缺少 REDIRECT 规则: iptables -t nat -S PREROUTING | grep REDIRECT"
+        [[ $input_ok -eq 0 ]] && warn "  缺少 INPUT 放行规则: iptables -S INPUT | grep -E '3001|40000'"
+        warn "  可在面板菜单执行 'pai infra setup' 重试 (需 root 权限)"
+    fi
 }
 
 # ─── Step 8: 启动服务 ─────────────────────────────────────────────
